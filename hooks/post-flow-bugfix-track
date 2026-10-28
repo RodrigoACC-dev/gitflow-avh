@@ -6,6 +6,7 @@
 # $1    The friendly name of the branch
 # $2    The origin remote
 # $3    The full branch name (including the bugfix prefix)
+# $4    The branch's worktree path when worktree mode (gitflow.worktree) is enabled, or an empty string otherwise
 #
 # The following variables are available as they are exported by git-flow:
 #

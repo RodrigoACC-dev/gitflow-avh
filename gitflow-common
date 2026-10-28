@@ -272,6 +272,157 @@ git_fetch_branch() {
 }
 
 #
+# Git worktree specific functionality
+#
+# These helpers back the opt-in "gitflow.worktree" mode: each git-flow
+# branch lives in its own worktree (named after the branch's full name,
+# prefix included) instead of being checked out in a single shared tree.
+#
+
+# gitflow_worktree_enabled()
+#
+# Whether the repository has opted into worktree-based branch management.
+#
+gitflow_worktree_enabled() {
+	git_config_bool_exists "gitflow.worktree"
+}
+
+# gitflow_worktree_hub_dir()
+#
+# The directory that holds the shared ".bare" git dir plus the sibling
+# worktree directories (master/, develop/, feature/, ...). It is the
+# parent of the repository's common git directory, which is stable
+# regardless of which worktree the command was invoked from.
+#
+gitflow_worktree_hub_dir() {
+	local common_dir
+
+	common_dir=$(git rev-parse --git-common-dir)
+	common_dir="$(cd "$common_dir" >/dev/null 2>&1 && pwd)"
+	(cd "$common_dir/.." >/dev/null 2>&1 && pwd)
+}
+
+# gitflow_worktree_path_for_branch()
+#
+# The worktree directory for a given branch, derived from its full name
+# (prefix included), e.g. "feature/login" -> "<hub>/feature/login".
+#
+# $1 Branch name (full, including prefix)
+#
+gitflow_worktree_path_for_branch() {
+	[ -n "$1" ] || die "Missing branch name"
+	echo "$(gitflow_worktree_hub_dir)/$1"
+}
+
+# gitflow_worktree_hook_arg()
+#
+# Resolve the trailing worktree-path argument passed to the start/track/
+# finish/delete hooks: the branch's worktree path when worktree mode is
+# enabled, or an empty string otherwise. Does not check whether the path
+# currently exists on disk, since callers need it both before creation
+# (pre-start) and after removal (post-delete).
+#
+# $1 Branch name (full, including prefix)
+#
+gitflow_worktree_hook_arg() {
+	if gitflow_worktree_enabled && [ -n "$1" ]; then
+		gitflow_worktree_path_for_branch "$1"
+	else
+		echo ""
+	fi
+}
+
+# gitflow_worktree_add()
+#
+# Create a new worktree for a branch. Used instead of "git checkout -b"
+# when worktree mode is enabled.
+#
+# $1 Branch name (full, including prefix)
+# $2 Start point (base branch, remote-tracking branch, or commit-ish)
+# $3 Optional extra flags to pass to "git worktree add" (e.g. --no-track)
+#
+gitflow_worktree_add() {
+	local branch startpoint extra_opts path
+
+	branch=$1
+	startpoint=$2
+	extra_opts=$3
+
+	[ -n "$branch" ] || die "Missing branch name"
+	[ -n "$startpoint" ] || die "Missing start point"
+
+	path=$(gitflow_worktree_path_for_branch "$branch")
+	mkdir -p "$(dirname "$path")" || die "Could not create parent directory for worktree '$path'."
+	git_do worktree add $extra_opts "$path" -b "$branch" "$startpoint" || die "Could not create worktree for branch '$branch' at '$path'."
+}
+
+# gitflow_worktree_remove()
+#
+# Force-remove a branch's worktree. MUST be called before deleting the
+# branch ref itself: Git refuses to delete a branch that is still
+# attached to a worktree. If removal fails (e.g. a locked file), this
+# aborts instead of continuing, so the branch ref is never deleted while
+# its worktree still exists.
+#
+# $1 Branch name (full, including prefix)
+#
+gitflow_worktree_remove() {
+	local branch path
+
+	branch=$1
+	[ -n "$branch" ] || die "Missing branch name"
+	path=$(gitflow_worktree_path_for_branch "$branch")
+
+	if [ -d "$path" ]; then
+		git_do worktree remove --force "$path" || die "Could not remove the worktree at '$path'. It may still be in use (open files, a terminal, or an editor); close it and retry."
+	fi
+}
+
+# gitflow_worktree_require_base()
+#
+# Abort with an actionable message when the given base branch has no
+# worktree of its own. Commands that merge into a base branch do so from
+# inside that base's worktree; without this check a missing worktree
+# fails at the cd and gets misreported as a merge conflict.
+#
+# $1 Base branch name
+#
+gitflow_worktree_require_base() {
+	local base path
+
+	base=$1
+	[ -n "$base" ] || die "Missing base branch name"
+	path=$(gitflow_worktree_path_for_branch "$base")
+
+	[ -d "$path" ] || die "No worktree found for base branch '$base' at '$path'. Only '$MASTER_BRANCH' and '$DEVELOP_BRANCH' get a worktree automatically; create one for '$base' first with 'git worktree add \"$path\" \"$base\"', then retry."
+}
+
+# gitflow_worktree_move()
+#
+# Relocate a branch's worktree after a rename, using Git's own move so
+# its internal worktree metadata stays consistent.
+#
+# $1 Old branch name (full, including prefix)
+# $2 New branch name (full, including prefix)
+#
+gitflow_worktree_move() {
+	local old_branch new_branch old_path new_path
+
+	old_branch=$1
+	new_branch=$2
+	[ -n "$old_branch" ] || die "Missing old branch name"
+	[ -n "$new_branch" ] || die "Missing new branch name"
+
+	old_path=$(gitflow_worktree_path_for_branch "$old_branch")
+	new_path=$(gitflow_worktree_path_for_branch "$new_branch")
+
+	if [ -d "$old_path" ]; then
+		mkdir -p "$(dirname "$new_path")" || die "Could not create parent directory for worktree '$new_path'."
+		git_do worktree move "$old_path" "$new_path" || die "Could not move the worktree from '$old_path' to '$new_path'."
+	fi
+}
+
+#
 # gitflow specific common functionality
 #
 
@@ -300,7 +451,10 @@ gitflow_is_initialized() {
 # Loading settings that can be overridden using git config
 gitflow_load_settings() {
 	export GIT_CURRENT_REPO_DIR="$(git rev-parse --show-toplevel 2>/dev/null)"
-	DOT_GIT_DIR=$(git rev-parse --git-dir)
+	# Use the shared common git dir, not --git-dir: for a linked worktree
+	# --git-dir returns that worktree's own private admin directory, which
+	# does not hold the shared hooks/ or the MERGE_BASE/SQUASH_MSG markers.
+	DOT_GIT_DIR=$(git rev-parse --git-common-dir)
 	export DOT_GIT_DIR="$(cd ${DOT_GIT_DIR} >/dev/null 2>&1 && pwd)"
 	export HOOKS_DIR="$(git config --get gitflow.path.hooks || echo ${DOT_GIT_DIR}/hooks)" # the second option is used to support previous versions of git-flow
 	export MASTER_BRANCH=$(git config --get gitflow.branch.master)
@@ -638,6 +792,9 @@ gitflow_rename_branch() {
 	run_pre_hook "$NAME" "$ORIGIN" "$BRANCH"
 	git_do branch -m "$BRANCH" "$NEW_BRANCH" || die "Error renaming branch '$BRANCH' to '$NEW_BRANCH'"
 	gitflow_config_rename_sections "$BRANCH" "$NEW_BRANCH"
+	if gitflow_worktree_enabled; then
+		gitflow_worktree_move "$BRANCH" "$NEW_BRANCH"
+	fi
 	run_post_hook "$NAME" "$ORIGIN" "$BRANCH"
 
 	echo
@@ -661,6 +818,12 @@ require_gitflow_initialized() {
 
 require_clean_working_tree() {
 	local result
+
+	# The shared hub directory of a worktree-mode repo (where the ".git"
+	# file points straight at ".bare") has no working tree of its own to
+	# be dirty; git itself reports it as bare from that vantage point
+	# even though linked worktrees are not. Nothing to check in that case.
+	[ "$(git rev-parse --is-bare-repository 2>/dev/null)" = "true" ] && return 0
 
 	git_is_clean_working_tree
 	result=$?
@@ -776,6 +939,15 @@ run_pre_hook() {
 
 	scriptfile="${HOOKS_DIR}/pre-flow-${SUBCOMMAND}-${SUBACTION}"
 	exitcode=0
+	# start/track/finish/delete create or remove a worktree; give those
+	# hooks the resolved worktree path as a trailing argument (empty
+	# string when worktree mode is off), without changing anything for
+	# other hooks.
+	case "$SUBACTION" in
+	start | track | finish | delete)
+		set -- "$@" "$(gitflow_worktree_hook_arg "$BRANCH")"
+		;;
+	esac
 	if [ -x "$scriptfile" ]; then
 		"$scriptfile" "$@"
 		exitcode=$?
@@ -800,6 +972,11 @@ run_post_hook() {
 	local scriptfile
 
 	scriptfile="${HOOKS_DIR}/post-flow-${SUBCOMMAND}-${SUBACTION}"
+	case "$SUBACTION" in
+	start | track | finish | delete)
+		set -- "$@" "$(gitflow_worktree_hook_arg "$BRANCH")"
+		;;
+	esac
 	if [ -x "$scriptfile" ]; then
 		"$scriptfile" "$@"
 	fi

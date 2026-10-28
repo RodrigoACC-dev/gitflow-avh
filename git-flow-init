@@ -66,6 +66,7 @@ h,help!             Show this help
 showcommands!       Show git commands while executing them
 d,[no]defaults      Use default branch naming conventions
 f,[no]force         Force setting of gitflow branches, even if already configured
+w,[no]worktree      Use git worktree for branch lifecycle management (sticky; use -f to change it later)
 
 p,feature!          Feature branches
 b,bugfix!           Bugfix branches
@@ -86,6 +87,13 @@ file=    use given config file
 	# Define flags
 	DEFINE_boolean 'force' false 'force setting of gitflow branches, even if already configured' f
 	DEFINE_boolean 'defaults' false 'use default branch naming conventions' d
+	# Default to whatever is already configured, so a plain `-f` reinit
+	# that doesn't mention --worktree/--no-worktree leaves it untouched.
+	if gitflow_worktree_enabled; then
+		DEFINE_boolean 'worktree' true 'use git worktree for branch lifecycle management' w
+	else
+		DEFINE_boolean 'worktree' false 'use git worktree for branch lifecycle management' w
+	fi
 	DEFINE_boolean 'local' false 'use repository config file'
 	DEFINE_boolean 'global' false 'use global config file'
 	DEFINE_boolean 'system' false 'use system config file'
@@ -408,7 +416,9 @@ file=    use given config file
 
 	# Paths
 	if ! git config --get gitflow.path.hooks >/dev/null 2>&1 || flag force; then
-		DOT_GIT_DIR=$(git rev-parse --git-dir)
+		# Use the shared common git dir, not --git-dir: see gitflow-common's
+		# gitflow_load_settings for why this matters once worktrees exist.
+		DOT_GIT_DIR=$(git rev-parse --git-common-dir)
 		DOT_GIT_DIR=$(cd "$DOT_GIT_DIR" >/dev/null 2>&1 && pwd)
 		default_suggestion=$(git config --get gitflow.path.hooks || git config --get core.hooksPath || echo "$DOT_GIT_DIR"/hooks)
 		printf "Hooks and filters directory? [$default_suggestion] "
@@ -421,7 +431,135 @@ file=    use given config file
 		git_do config $gitflow_config_option gitflow.path.hooks "$hooks_dir"
 	fi
 
+	# Worktree mode
+	# -------------
+	# Opt-in and sticky: write the setting first (while ".git" still
+	# exists at its normal location), then migrate the on-disk layout.
+	# Changing it later requires `git flow init -f`.
+	if flag worktree; then
+		git_do config $gitflow_config_option --bool gitflow.worktree true
+		gitflow_init_setup_worktrees "$master_branch" "$develop_branch"
+	else
+		if gitflow_worktree_enabled; then
+			warn "Worktree mode is being disabled. The existing '.bare' directory and worktrees on disk are left as-is; collapsing them back into a single working tree is a manual step."
+		fi
+		git_do config $gitflow_config_option --bool gitflow.worktree false
+	fi
+
 	# TODO: what to do with origin?
+}
+
+# gitflow_init_setup_worktrees()
+#
+# One-time migration into the opt-in worktree layout: the repository's
+# git directory moves to ".bare", whichever branch is currently checked
+# out keeps its working files in place (relocated into its own worktree
+# directory, including anything uncommitted or untracked), master and
+# develop each get their own permanent worktree, and persistent
+# container directories are created for every configured branch-type
+# prefix. Safe to call repeatedly: it skips the migration itself when
+# ".bare" already exists, but still (re-)creates any missing prefix
+# container directories.
+#
+# $1 Master branch name
+# $2 Develop branch name
+#
+gitflow_init_setup_worktrees() {
+	local master_branch develop_branch repo_root bare_dir cur_branch entry prefix prefix_dir staging
+
+	master_branch=$1
+	develop_branch=$2
+
+	# Not --show-toplevel: once ".bare" exists, the hub root has no work
+	# tree of its own (git reports it as bare from there), so the hub dir
+	# must be derived from the common git dir instead, which resolves
+	# correctly both before migration (parent of ".git") and after
+	# (parent of ".bare").
+	repo_root="$(gitflow_worktree_hub_dir)"
+	bare_dir="$repo_root/.bare"
+
+	if [ -d "$bare_dir" ]; then
+		warn "Worktree layout already set up ('.bare' exists); skipping migration."
+	else
+		cur_branch=$(git_current_branch)
+		if [ "$cur_branch" = "(unnamed branch)" ]; then
+			die "Cannot enable worktree mode from a detached HEAD. Check out '$master_branch' or '$develop_branch' first, then run 'git flow init -f --worktree' again."
+		fi
+
+		# "git worktree add" requires its target path to not already
+		# exist, so stage the repo root's current content (tracked and
+		# untracked alike) out of the way first, relocate ".git", let
+		# "worktree add" create a fresh empty directory for the branch,
+		# then move the staged files back into it.
+		staging="$repo_root/.gitflow-migrate-tmp"
+		mkdir "$staging" || die "Could not create a temporary staging directory for migration."
+
+		for entry in "$repo_root"/* "$repo_root"/.[!.]* "$repo_root"/..?*; do
+			[ -e "$entry" ] || [ -L "$entry" ] || continue
+			case "$(basename "$entry")" in
+			.git | .gitflow-migrate-tmp) continue ;;
+			esac
+			mv "$entry" "$staging/" || die "Could not stage '$entry' for migration."
+		done
+
+		mv "$repo_root/.git" "$bare_dir" || die "Could not move '.git' to '.bare'."
+		git_do --git-dir="$bare_dir" config core.bare true
+
+		# gitflow.path.hooks may have been stored (moments earlier, in
+		# this same init run) as the auto-suggested default inside
+		# ".git", which has just become ".bare" -- including its own
+		# "hooks/" subdirectory, since the whole directory was moved as
+		# one unit. Repoint the stored value in that case; a path the
+		# user customized to somewhere unrelated is left untouched.
+		if [ "$(git --git-dir="$bare_dir" config --get gitflow.path.hooks 2>/dev/null)" = "$repo_root/.git/hooks" ]; then
+			git_do --git-dir="$bare_dir" config gitflow.path.hooks "$bare_dir/hooks"
+		fi
+
+		# A plain ".git" pointer file at the hub root lets ordinary git
+		# (and git-flow) commands run there find the repository, without
+		# making the hub root itself a worktree: core.bare=true means git
+		# reports it as bare from that vantage point (no working tree to
+		# check out, commit, or require clean), while every linked
+		# worktree underneath it still behaves like a normal checkout.
+		echo "gitdir: ./.bare" > "$repo_root/.git" || die "Could not create the hub '.git' pointer file."
+
+		if git_do --git-dir="$bare_dir" config --get remote.origin.url >/dev/null 2>&1; then
+			git_do --git-dir="$bare_dir" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+		fi
+
+		git_do --git-dir="$bare_dir" worktree add --no-checkout "$repo_root/$cur_branch" "$cur_branch" || die "Could not register the worktree for '$cur_branch'."
+
+		for entry in "$staging"/* "$staging"/.[!.]* "$staging"/..?*; do
+			[ -e "$entry" ] || [ -L "$entry" ] || continue
+			mv "$entry" "$repo_root/$cur_branch/" || die "Could not relocate '$entry' into '$repo_root/$cur_branch'."
+		done
+		rmdir "$staging" 2>/dev/null
+
+		# "--no-checkout" leaves a worktree with an empty index (every
+		# tracked file would show as both staged-deleted and untracked).
+		# The real files are already on disk with content matching HEAD
+		# (the working tree was required to be clean before migrating),
+		# so a plain reset re-syncs the index to HEAD without touching
+		# any file, correctly leaving only genuinely untracked files as
+		# untracked.
+		(cd "$repo_root/$cur_branch" && git_do reset -q) || die "Could not resync the index for the '$cur_branch' worktree."
+
+		if [ "$cur_branch" != "$master_branch" ]; then
+			git_do --git-dir="$bare_dir" worktree add "$repo_root/$master_branch" "$master_branch" || die "Could not create the worktree for '$master_branch'."
+		fi
+		if [ "$cur_branch" != "$develop_branch" ]; then
+			git_do --git-dir="$bare_dir" worktree add "$repo_root/$develop_branch" "$develop_branch" || die "Could not create the worktree for '$develop_branch'."
+		fi
+	fi
+
+	# Persistent container directories, one per configured branch-type
+	# prefix (trailing slash stripped). A prefix explicitly set to empty
+	# ("-") has no sensible container directory and is skipped.
+	for prefix in feature bugfix release hotfix support; do
+		prefix_dir=$(git --git-dir="$bare_dir" config --get "gitflow.prefix.$prefix")
+		prefix_dir=${prefix_dir%/}
+		[ -n "$prefix_dir" ] && mkdir -p "$repo_root/$prefix_dir"
+	done
 }
 
 cmd_help() {

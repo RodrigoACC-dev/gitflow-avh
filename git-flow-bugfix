@@ -219,14 +219,22 @@ F,[no]fetch      Fetch from origin before performing local operation
 	gitflow_config_set_base_branch $base $BRANCH
 
 	# create branch
-	git_do checkout -b "$BRANCH" "$base" || die "Could not create bugfix branch '$BRANCH'."
+	if gitflow_worktree_enabled; then
+		gitflow_worktree_add "$BRANCH" "$base"
+	else
+		git_do checkout -b "$BRANCH" "$base" || die "Could not create bugfix branch '$BRANCH'."
+	fi
 
 	run_post_hook "$NAME" "$ORIGIN" "$BRANCH" "$base"
 
 	echo
 	echo "Summary of actions:"
 	echo "- A new branch '$BRANCH' was created, based on '$base'"
-	echo "- You are now on branch '$(git_current_branch)'"
+	if gitflow_worktree_enabled; then
+		echo "- A new worktree was created at '$(gitflow_worktree_path_for_branch "$BRANCH")'"
+	else
+		echo "- You are now on branch '$(git_current_branch)'"
+	fi
 	echo ""
 	echo "Now, start committing on your bugfix. When done, use:"
 	echo ""
@@ -386,22 +394,28 @@ no-ff!                 Never fast-forward during the merge
 	fi
 
 	# Merge into BASE
-	git_do checkout "$BASE_BRANCH" || die "Could not check out branch '$BASE_BRANCH'."
+	if gitflow_worktree_enabled; then
+		gitflow_worktree_require_base "$BASE_BRANCH"
+		BASE_WORKTREE=$(gitflow_worktree_path_for_branch "$BASE_BRANCH")
+	else
+		git_do checkout "$BASE_BRANCH" || die "Could not check out branch '$BASE_BRANCH'."
+		BASE_WORKTREE=$(pwd)
+	fi
 
 	if noflag squash; then
 		if flag no_ff; then
-			git_do merge --no-ff "$BRANCH"
+			(cd "$BASE_WORKTREE" && git_do merge --no-ff "$BRANCH")
 		else
 			if [ "$(git rev-list -n2 "$BASE_BRANCH..$BRANCH" | wc -l)" -eq 1 ]; then
-				git_do merge --ff "$BRANCH"
+				(cd "$BASE_WORKTREE" && git_do merge --ff "$BRANCH")
 			else
-				git_do merge --no-ff "$BRANCH"
+				(cd "$BASE_WORKTREE" && git_do merge --no-ff "$BRANCH")
 			fi
 		fi
 	else
-		git_do merge --squash "$BRANCH"
-		flag squash_info && gitflow_create_squash_message "Merged bugfix branch '$BRANCH'" "$BASE_BRANCH" "$BRANCH" > "$DOT_GIT_DIR/SQUASH_MSG"
-		git_do commit
+		(cd "$BASE_WORKTREE" && git_do merge --squash "$BRANCH")
+		flag squash_info && gitflow_create_squash_message "Merged bugfix branch '$BRANCH'" "$BASE_BRANCH" "$BRANCH" > "$(git -C "$BASE_WORKTREE" rev-parse --git-dir)/SQUASH_MSG"
+		(cd "$BASE_WORKTREE" && git_do commit)
 	fi
 
 	if [ $? -ne 0 ]; then
@@ -453,8 +467,15 @@ helper_finish_cleanup() {
 
 		# Delete local after remote to avoid warnings
 		if noflag keeplocal; then
-			if [ "$BRANCH" = "$(git_current_branch)" ]; then
-				git_do checkout "$BASE_BRANCH" || die "Could not check out branch '$BASE_BRANCH'."
+			if gitflow_worktree_enabled; then
+				# Move out of the bugfix's worktree before removing it,
+				# in case this script's own cwd is sitting inside it.
+				cd "$(gitflow_worktree_path_for_branch "$BASE_BRANCH")" 2>/dev/null || cd "$(gitflow_worktree_hub_dir)" 2>/dev/null
+				gitflow_worktree_remove "$BRANCH"
+			else
+				if [ "$BRANCH" = "$(git_current_branch)" ]; then
+					git_do checkout "$BASE_BRANCH" || die "Could not check out branch '$BASE_BRANCH'."
+				fi
 			fi
 			if flag force_delete; then
 				git_do branch -D "$BRANCH" && localbranchdeleted=$FLAGS_TRUE
@@ -529,7 +550,9 @@ showcommands!    Show git commands while executing them
 	# Create remote branch with remote tracking
 	git_do push -u "$ORIGIN" "$BRANCH:$BRANCH"
 	git_do fetch -q "$ORIGIN" "$BRANCH" || die "Could not fetch branch '$BRANCH' from remote '$ORIGIN'."
-	git_do checkout "$BRANCH" || die "Could not check out branch '$BRANCH'."
+	if ! gitflow_worktree_enabled; then
+		git_do checkout "$BRANCH" || die "Could not check out branch '$BRANCH'."
+	fi
 
 	run_post_hook "$NAME" "$ORIGIN" "$BRANCH"
 
@@ -537,7 +560,11 @@ showcommands!    Show git commands while executing them
 	echo "Summary of actions:"
 	echo "- The remote branch '$BRANCH' was created or updated"
 	echo "- The local branch '$BRANCH' was configured to track the remote branch"
-	echo "- You are now on branch '$(git_current_branch)'"
+	if gitflow_worktree_enabled; then
+		echo "- The branch is available at '$(gitflow_worktree_path_for_branch "$BRANCH")'"
+	else
+		echo "- You are now on branch '$(git_current_branch)'"
+	fi
 	echo
 }
 
@@ -565,14 +592,22 @@ showcommands!    Show git commands while executing them
 	git_remote_branch_exists "$ORIGIN/$BRANCH"
 
 	# Create tracking branch
-	git_do checkout -b "$BRANCH" "$ORIGIN/$BRANCH" || die "Could not create '$BRANCH'."
+	if gitflow_worktree_enabled; then
+		gitflow_worktree_add "$BRANCH" "$ORIGIN/$BRANCH"
+	else
+		git_do checkout -b "$BRANCH" "$ORIGIN/$BRANCH" || die "Could not create '$BRANCH'."
+	fi
 
 	run_post_hook "$NAME" "$ORIGIN" "$BRANCH"
 
 	echo
 	echo "Summary of actions:"
 	echo "- A new remote tracking branch '$BRANCH' was created"
-	echo "- You are now on branch '$(git_current_branch)'"
+	if gitflow_worktree_enabled; then
+		echo "- A new worktree was created at '$(gitflow_worktree_path_for_branch "$BRANCH")'"
+	else
+		echo "- You are now on branch '$(git_current_branch)'"
+	fi
 	echo
 }
 
@@ -616,7 +651,12 @@ showcommands!    Show git commands while executing them
 	NAME=$(gitflow_resolve_nameprefix "$NAME" "$PREFIX")
 	if [ $? -eq 0 ]; then
 		BRANCH=$PREFIX$NAME
-		git_do checkout "$BRANCH"  || die "Could not check out branch '$BRANCH'."
+		if gitflow_worktree_enabled; then
+			require_branch "$BRANCH"
+			echo "$(gitflow_worktree_path_for_branch "$BRANCH")"
+		else
+			git_do checkout "$BRANCH"  || die "Could not check out branch '$BRANCH'."
+		fi
 	fi
 }
 
@@ -666,14 +706,18 @@ p,[no]preserve-merges  Preserve merges
 
 	git_local_branch_exists "$BASE_BRANCH" || die "The base '$BASE_BRANCH' doesn't exists locally or is not a branch. Can't rebase the bugfix branch '$BRANCH'."
 
-	git_do checkout -q "$BRANCH"  || die "Could not check out branch '$BRANCH'."
 	if flag interactive; then
 		opts="$opts -i"
 	fi
 	if flag preserve_merges; then
 		opts="$opts -p"
 	fi
-	git_do rebase $opts "$BASE_BRANCH"
+	if gitflow_worktree_enabled; then
+		(cd "$(gitflow_worktree_path_for_branch "$BRANCH")" && git_do rebase $opts "$BASE_BRANCH")
+	else
+		git_do checkout -q "$BRANCH"  || die "Could not check out branch '$BRANCH'."
+		git_do rebase $opts "$BASE_BRANCH"
+	fi
 }
 
 avoid_accidental_cross_branch_action() {
@@ -718,12 +762,15 @@ showcommands!    Show git commands while executing them
 
 	# To avoid accidentally merging different bugfix branches into each other,
 	# die if the current bugfix branch differs from the requested $NAME
-	# argument.
-	current_branch=$(git_current_branch)
-	if startswith "$current_branch" "$PREFIX"; then
-		# We are on a local bugfix branch already, so $BRANCH must be equal to
-		# the current branch
-		avoid_accidental_cross_branch_action || die
+	# argument. Not needed under worktree mode: operations below target the
+	# branch's own worktree directly, regardless of where this was invoked.
+	if ! gitflow_worktree_enabled; then
+		current_branch=$(git_current_branch)
+		if startswith "$current_branch" "$PREFIX"; then
+			# We are on a local bugfix branch already, so $BRANCH must be equal to
+			# the current branch
+			avoid_accidental_cross_branch_action || die
+		fi
 	fi
 
 	require_clean_working_tree
@@ -731,26 +778,41 @@ showcommands!    Show git commands while executing them
 	run_pre_hook "$NAME" "$REMOTE" "$BRANCH"
 
 	if git_local_branch_exists "$BRANCH"; then
-		# Again, avoid accidental merges
-		avoid_accidental_cross_branch_action || die
-
-		# We already have a local branch called like this, so simply pull the
-		# remote changes in
-		if flag rebase; then
-			if ! git_do pull --rebase -q "$REMOTE" "$BRANCH"; then
-				warn "Pull was aborted. There might be conflicts during rebase or '$REMOTE' might be inaccessible."
-				exit 1
+		if gitflow_worktree_enabled; then
+			if flag rebase; then
+				if ! (cd "$(gitflow_worktree_path_for_branch "$BRANCH")" && git_do pull --rebase -q "$REMOTE" "$BRANCH"); then
+					warn "Pull was aborted. There might be conflicts during rebase or '$REMOTE' might be inaccessible."
+					exit 1
+				fi
+			else
+				(cd "$(gitflow_worktree_path_for_branch "$BRANCH")" && git_do pull -q "$REMOTE" "$BRANCH") || die "Failed to pull from remote '$REMOTE'."
 			fi
 		else
-			git_do pull -q "$REMOTE" "$BRANCH" || die "Failed to pull from remote '$REMOTE'."
+			# Again, avoid accidental merges
+			avoid_accidental_cross_branch_action || die
+
+			# We already have a local branch called like this, so simply pull the
+			# remote changes in
+			if flag rebase; then
+				if ! git_do pull --rebase -q "$REMOTE" "$BRANCH"; then
+					warn "Pull was aborted. There might be conflicts during rebase or '$REMOTE' might be inaccessible."
+					exit 1
+				fi
+			else
+				git_do pull -q "$REMOTE" "$BRANCH" || die "Failed to pull from remote '$REMOTE'."
+			fi
 		fi
 
 		echo "Pulled $REMOTE's changes into $BRANCH."
 	else
 		# Setup the local branch clone for the first time
 		git_do fetch -q "$REMOTE" "$BRANCH" ||  die "Could not fetch branch '$BRANCH' from remote '$REMOTE'."     # Stores in FETCH_HEAD
-		git_do branch --no-track "$BRANCH" FETCH_HEAD || die "Branch failed."
-		git_do checkout -q "$BRANCH" || die "Could not check out branch '$BRANCH'."
+		if gitflow_worktree_enabled; then
+			gitflow_worktree_add "$BRANCH" "FETCH_HEAD" "--no-track"
+		else
+			git_do branch --no-track "$BRANCH" FETCH_HEAD || die "Branch failed."
+			git_do checkout -q "$BRANCH" || die "Could not check out branch '$BRANCH'."
+		fi
 		echo "Created local branch $BRANCH based on $REMOTE's $BRANCH."
 	fi
 
@@ -791,14 +853,21 @@ r,[no]remote     Delete remote branch
 
 	run_pre_hook "$NAME" "$ORIGIN" "$BRANCH"
 
-	current_branch=$(git_current_branch)
-	# We can't delete a branch we are on, switch to the develop branch.
-	if [ "$BRANCH" = "$current_branch" ]; then
-		require_clean_working_tree
-		if git_local_branch_exists "$BASE_BRANCH"; then
-			git_do checkout "$BASE_BRANCH"
-		else
-			git_do checkout "$DEVELOP_BRANCH" || die "Could not check out branch '$DEVELOP_BRANCH'."
+	if gitflow_worktree_enabled; then
+		# Move out of the branch's worktree before removing it, in case
+		# this script's own cwd is sitting inside it.
+		cd "$(gitflow_worktree_path_for_branch "$BASE_BRANCH")" 2>/dev/null || cd "$(gitflow_worktree_hub_dir)" 2>/dev/null
+		gitflow_worktree_remove "$BRANCH"
+	else
+		current_branch=$(git_current_branch)
+		# We can't delete a branch we are on, switch to the develop branch.
+		if [ "$BRANCH" = "$current_branch" ]; then
+			require_clean_working_tree
+			if git_local_branch_exists "$BASE_BRANCH"; then
+				git_do checkout "$BASE_BRANCH"
+			else
+				git_do checkout "$DEVELOP_BRANCH" || die "Could not check out branch '$DEVELOP_BRANCH'."
+			fi
 		fi
 	fi
 

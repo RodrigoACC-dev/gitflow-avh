@@ -221,14 +221,22 @@ F,[no]fetch       Fetch from origin before performing local operation
 	gitflow_config_set_base_branch $base $BRANCH
 
 	# Create branch
-	git_do checkout -b "$BRANCH" "$base"  || die "Could not create hotfix branch '$BRANCH'."
+	if gitflow_worktree_enabled; then
+		gitflow_worktree_add "$BRANCH" "$base"
+	else
+		git_do checkout -b "$BRANCH" "$base"  || die "Could not create hotfix branch '$BRANCH'."
+	fi
 
 	run_post_hook "$VERSION_PREFIX$VERSION" "$ORIGIN" "$BRANCH" "$base"
 
 	echo
 	echo "Summary of actions:"
 	echo "- A new branch '$BRANCH' was created, based on '$base'"
-	echo "- You are now on branch '$(git_current_branch)'"
+	if gitflow_worktree_enabled; then
+		echo "- A new worktree was created at '$(gitflow_worktree_path_for_branch "$BRANCH")'"
+	else
+		echo "- You are now on branch '$(git_current_branch)'"
+	fi
 	echo
 	echo "Follow-up actions:"
 	echo "- Start committing your hot fixes"
@@ -267,7 +275,9 @@ showcommands!     Show git commands while executing them
 	# Create remote branch with remote tracking
 	git_do push -u "$ORIGIN" "$BRANCH:$BRANCH"
 	git_do fetch -q "$ORIGIN" "$BRANCH" || die "Could not fetch branch '$BRANCH' from remote '$ORIGIN'."
-	git_do checkout "$BRANCH" || die "Could not check out branch '$BRANCH'."
+	if ! gitflow_worktree_enabled; then
+		git_do checkout "$BRANCH" || die "Could not check out branch '$BRANCH'."
+	fi
 
 	run_post_hook "$VERSION_PREFIX$VERSION" "$ORIGIN" "$BRANCH"
 
@@ -275,7 +285,11 @@ showcommands!     Show git commands while executing them
 	echo "Summary of actions:"
 	echo "- The remote branch '$BRANCH' was created or updated"
 	echo "- The local branch '$BRANCH' was configured to track the remote branch"
-	echo "- You are now on branch '$(git_current_branch)'"
+	if gitflow_worktree_enabled; then
+		echo "- The branch is available at '$(gitflow_worktree_path_for_branch "$BRANCH")'"
+	else
+		echo "- You are now on branch '$(git_current_branch)'"
+	fi
 	echo
 }
 
@@ -319,14 +333,18 @@ p,[no]preserve-merges  Preserve merges
 
 	git_local_branch_exists "$BASE_BRANCH" || die "The base '$BASE_BRANCH' doesn't exists locally or is not a branch. Can't rebase the hotfixe branch '$BRANCH'."
 
-	git_do checkout -q "$BRANCH"  || die "Could not check out branch '$BRANCH'."
 	if flag interactive; then
 		opts="$opts -i"
 	fi
 	if flag preserve_merges; then
 		opts="$opts -p"
 	fi
-	git_do rebase $opts "$BASE_BRANCH"
+	if gitflow_worktree_enabled; then
+		(cd "$(gitflow_worktree_path_for_branch "$BRANCH")" && git_do rebase $opts "$BASE_BRANCH")
+	else
+		git_do checkout -q "$BRANCH"  || die "Could not check out branch '$BRANCH'."
+		git_do rebase $opts "$BASE_BRANCH"
+	fi
 }
 
 cmd_track() {
@@ -350,12 +368,20 @@ showcommands!     Show git commands while executing them
 	require_branch "$ORIGIN/$BRANCH"
 
 	# Create tracking branch
-	git_do checkout -b "$BRANCH" "$ORIGIN/$BRANCH"
+	if gitflow_worktree_enabled; then
+		gitflow_worktree_add "$BRANCH" "$ORIGIN/$BRANCH"
+	else
+		git_do checkout -b "$BRANCH" "$ORIGIN/$BRANCH"
+	fi
 
 	echo
 	echo "Summary of actions:"
 	echo "- A new remote tracking branch '$BRANCH' was created"
-	echo "- You are now on branch '$BRANCH'"
+	if gitflow_worktree_enabled; then
+		echo "- A new worktree was created at '$(gitflow_worktree_path_for_branch "$BRANCH")'"
+	else
+		echo "- You are now on branch '$BRANCH'"
+	fi
 	echo
 }
 
@@ -513,17 +539,27 @@ T,tagname!            Use given tag name
 
 	run_pre_hook "$VERSION_PREFIX$TAGNAME" "$ORIGIN" "$BRANCH"
 
+	if gitflow_worktree_enabled; then
+		gitflow_worktree_require_base "$BASE_BRANCH"
+		BASE_WORKTREE=$(gitflow_worktree_path_for_branch "$BASE_BRANCH")
+	else
+		BASE_WORKTREE=$(pwd)
+	fi
+
 	# Try to merge into BASE.
 	# In case a previous attempt to finish this release branch has failed,
 	# but the merge into BASE was successful, we skip it now
 	if ! git_is_branch_merged_into "$BRANCH" "$BASE_BRANCH"; then
-		git_do checkout "$BASE_BRANCH" || die "Could not check out branch '$BASE_BRANCH'."
+		if ! gitflow_worktree_enabled; then
+			git_do checkout "$BASE_BRANCH" || die "Could not check out branch '$BASE_BRANCH'."
+			BASE_WORKTREE=$(pwd)
+		fi
 		if noflag squash; then
-			git_do merge --no-ff "$BRANCH" || die "There were merge conflicts." # TODO: What do we do now?
+			(cd "$BASE_WORKTREE" && git_do merge --no-ff "$BRANCH") || die "There were merge conflicts." # TODO: What do we do now?
 		else
-			git_do merge --squash "$BRANCH" || die "There were merge conflicts." # TODO: What do we do now?
-			flag squash_info && gitflow_create_squash_message "Merged hotfix branch '$BRANCH'" "$BASE_BRANCH" "$BRANCH" > "$DOT_GIT_DIR/SQUASH_MSG"
-			git_do commit
+			(cd "$BASE_WORKTREE" && git_do merge --squash "$BRANCH") || die "There were merge conflicts." # TODO: What do we do now?
+			flag squash_info && gitflow_create_squash_message "Merged hotfix branch '$BRANCH'" "$BASE_BRANCH" "$BRANCH" > "$(git -C "$BASE_WORKTREE" rev-parse --git-dir)/SQUASH_MSG"
+			(cd "$BASE_WORKTREE" && git_do commit)
 		fi
 	fi
 
@@ -544,11 +580,18 @@ T,tagname!            Use given tag name
 				opts="$opts -m '$FLAGS_message'"
 			fi
 			[ "$FLAGS_messagefile" != "" ] && opts="$opts -F '$FLAGS_messagefile'"
-			eval git_do tag $opts "$VERSION_PREFIX$TAGNAME" || die "Tagging failed. Please run finish again to retry."
+			(cd "$BASE_WORKTREE" && eval git_do tag $opts "$VERSION_PREFIX$TAGNAME") || die "Tagging failed. Please run finish again to retry."
 		fi
 	fi
 
 	if [ "$BASE_BRANCH" = "$MASTER_BRANCH" ]; then
+		if gitflow_worktree_enabled; then
+			gitflow_worktree_require_base "$DEVELOP_BRANCH"
+			DEVELOP_WORKTREE=$(gitflow_worktree_path_for_branch "$DEVELOP_BRANCH")
+		else
+			DEVELOP_WORKTREE=$(pwd)
+		fi
+
 		# By default we back-merge the $MASTER_BRANCH unless the user explicitly
 		# stated not to do a back-merge, in that case we use the $BRANCH.
 		if noflag nobackmerge; then
@@ -561,7 +604,10 @@ T,tagname!            Use given tag name
 		# In case a previous attempt to finish this release branch has failed,
 		# but the merge into develop was successful, we skip it now
 		if ! git_is_branch_merged_into "$MERGE_BRANCH" "$DEVELOP_BRANCH"; then
-			git_do checkout "$DEVELOP_BRANCH" || die "Could not check out branch '$DEVELOP_BRANCH'."
+			if ! gitflow_worktree_enabled; then
+				git_do checkout "$DEVELOP_BRANCH" || die "Could not check out branch '$DEVELOP_BRANCH'."
+				DEVELOP_WORKTREE=$(pwd)
+			fi
 
 			if noflag nobackmerge; then
 				# Accounting for 'git describe', if a release is tagged
@@ -575,7 +621,7 @@ T,tagname!            Use given tag name
 				commit="$BRANCH"
 			fi
 
-			git_do merge --no-ff "$commit" || die "There were merge conflicts."
+			(cd "$DEVELOP_WORKTREE" && git_do merge --no-ff "$commit") || die "There were merge conflicts."
 			# TODO: What do we do now?
 		fi
 	fi
@@ -604,8 +650,15 @@ T,tagname!            Use given tag name
 
 		# Delete local after remote to avoid warnings
 		if noflag keeplocal; then
-			if [ "$BRANCH" = "$(git_current_branch)" ]; then
-				git_do checkout "$DEVELOP_BRANCH" || die "Could not check out branch '$DEVELOP_BRANCH'."
+			if gitflow_worktree_enabled; then
+				# Move out of the hotfix's worktree before removing it,
+				# in case this script's own cwd is sitting inside it.
+				cd "$(gitflow_worktree_path_for_branch "$DEVELOP_BRANCH")" 2>/dev/null || cd "$(gitflow_worktree_hub_dir)" 2>/dev/null
+				gitflow_worktree_remove "$BRANCH"
+			else
+				if [ "$BRANCH" = "$(git_current_branch)" ]; then
+					git_do checkout "$DEVELOP_BRANCH" || die "Could not check out branch '$DEVELOP_BRANCH'."
+				fi
 			fi
 			if flag force_delete; then
 				git_do branch -D "$BRANCH" && localbranchdeleted=$FLAGS_TRUE
@@ -696,11 +749,18 @@ r,[no]remote          Delete remote branch
 
 	run_pre_hook "$VERSION" "$ORIGIN" "$BRANCH"
 
-	current_branch=$(git_current_branch)
-	# We can't delete a branch we are on, switch to the master branch.
-	if [ "$BRANCH" = "$current_branch" ]; then
-		require_clean_working_tree
-		git_do checkout "$MASTER_BRANCH" || die "Could not check out branch '$MASTER_BRANCH'."
+	if gitflow_worktree_enabled; then
+		# Move out of the hotfix's worktree before removing it, in case
+		# this script's own cwd is sitting inside it.
+		cd "$(gitflow_worktree_path_for_branch "$MASTER_BRANCH")" 2>/dev/null || cd "$(gitflow_worktree_hub_dir)" 2>/dev/null
+		gitflow_worktree_remove "$BRANCH"
+	else
+		current_branch=$(git_current_branch)
+		# We can't delete a branch we are on, switch to the master branch.
+		if [ "$BRANCH" = "$current_branch" ]; then
+			require_clean_working_tree
+			git_do checkout "$MASTER_BRANCH" || die "Could not check out branch '$MASTER_BRANCH'."
+		fi
 	fi
 
 	if ( git_is_branch_merged_into "$BRANCH" "$MASTER_BRANCH" && git_is_branch_merged_into "$BRANCH" "$DEVELOP_BRANCH" ); then

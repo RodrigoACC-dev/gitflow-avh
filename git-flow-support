@@ -191,12 +191,20 @@ F,[no]fetch       Fetch from origin before performing finish
 	require_branch_absent "$BRANCH"
 
 	# Create branch
-	git_do checkout -b "$BRANCH" "$BASE" || die "Could not create support branch '$BRANCH'."
+	if gitflow_worktree_enabled; then
+		gitflow_worktree_add "$BRANCH" "$BASE"
+	else
+		git_do checkout -b "$BRANCH" "$BASE" || die "Could not create support branch '$BRANCH'."
+	fi
 
 	echo
 	echo "Summary of actions:"
 	echo "- A new branch '$BRANCH' was created, based on '$BASE'"
-	echo "- You are now on branch '$(git_current_branch)'"
+	if gitflow_worktree_enabled; then
+		echo "- A new worktree was created at '$(gitflow_worktree_path_for_branch "$BRANCH")'"
+	else
+		echo "- You are now on branch '$(git_current_branch)'"
+	fi
 	echo
 }
 
@@ -240,12 +248,16 @@ p,[no]preserve-merges  Preserve merges
 
 	git_local_branch_exists "$BASE_BRANCH" || die "The base '$BASE_BRANCH' doesn't exists locally or is not a branch. Can't rebase the support branch '$BRANCH'."
 
-	git_do checkout -q "$BRANCH"  || die "Could not check out branch '$BRANCH'."
 	if flag interactive; then
 		opts="$opts -i"
 	fi
 	if flag preserve_merges; then
 		opts="$opts -p"
 	fi
-	git_do rebase $opts "$BASE_BRANCH"
+	if gitflow_worktree_enabled; then
+		(cd "$(gitflow_worktree_path_for_branch "$BRANCH")" && git_do rebase $opts "$BASE_BRANCH")
+	else
+		git_do checkout -q "$BRANCH"  || die "Could not check out branch '$BRANCH'."
+		git_do rebase $opts "$BASE_BRANCH"
+	fi
 }

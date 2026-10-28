@@ -85,3 +85,9 @@
 - [x] 11.3 Apply the same guard to `git-flow-bugfix` `cmd_finish`; verify with the same scenario.
 - [x] 11.4 Apply the same guard to `git-flow-hotfix` `cmd_finish` (covering both the base merge and the develop back-merge paths); verify the error replaces the misleading "There were merge conflicts." message.
 - [x] 11.5 Re-run the standard-scenario regression (feature/bugfix/hotfix finish against `develop`/`master`) to confirm the guard changes nothing when the base worktree exists.
+
+## 12. Automated smoke tests
+
+- [x] 12.1 Add `tests/smoke-worktree.sh`: a self-contained POSIX shell suite that stages LF copies of the scripts, builds throwaway repositories, and asserts on directory/branch/file state; verify `sh -n tests/smoke-worktree.sh` passes.
+- [x] 12.2 Cover the verification scenarios in the suite: init layout (`.bare`, master/develop worktrees, prefix containers), feature start/finish from inside its worktree, merge conflict with resume from a different worktree, the missing-base-worktree guard, forced-removal failure keeping the branch, per-worktree `SQUASH_MSG`, and classic-mode regression.
+- [x] 12.3 Run `sh tests/smoke-worktree.sh` and confirm it exits 0 (39 checks, 0 failures).

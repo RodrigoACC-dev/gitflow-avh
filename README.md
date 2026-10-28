@@ -1,5 +1,8 @@
 # git-flow (AVH Edition)
 
+> **Note:** This repository is a fork of
+> [gitflow-avh](https://github.com/petervanderdoes/gitflow-avh).
+
 A collection of Git extensions to provide high-level repository operations
 for Vincent Driessen's [branching model](http://nvie.com/git-model "original
 blog post"). This fork adds functionality not added to the original branch.
@@ -271,15 +274,3 @@ The `start`, `track`, `finish`, and `delete` hooks receive one additional
 trailing argument: the branch's worktree path when [worktree mode](#worktree-mode)
 is enabled, or an empty string otherwise. Existing hook scripts that only read
 their original arguments are unaffected.
-
-## Showing your appreciation
-
-Of course, the best way to show your appreciation for the git-flow tool itself
-remains contributing to the community.  If you'd like to show your appreciation
-in another way, however, consider donating through PayPal:
-
-[![PayPal][2]][1]
-
-[1]: https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=S85FXJ9EBHAF2&lc=US&item_name=gitflow&item_number=gitflow&no_note=0&cn=Add%20special%20instructions%20to%20the%20seller&no_shipping=1&rm=1&return=https%3a%2f%2fgithub%2ecom%2fpetervanderdoes%2fgitflow&cancel_return=https%3a%2f%2fgithub%2ecom%2fpetervanderdoes%2fgitflow&currency_code=USD&bn=PP%2dDonationsBF%3abtn_donate_SM%2egif%3aNonHosted
-
-[2]: https://www.paypalobjects.com/en_US/i/btn/btn_donate_SM.gif

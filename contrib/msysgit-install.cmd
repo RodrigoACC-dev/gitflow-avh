@@ -33,11 +33,11 @@ for /F %%i in ("%GIT_HOME%\git-flow*" "%GIT_HOME%\gitflow-*") do if exist "%%~fi
 :Install
 echo Copying files...
 ::goto :EOF
-xcopy "%~dp0\..\git-flow"            "%GIT_HOME%\bin"                 /Y /R /F
+xcopy "%~dp0\..\git-flow"            "%GIT_HOME%\usr\bin"                 /Y /R /F
 if errorlevel 4 if not errorlevel 5 goto :AccessDenied
 if errorlevel 1 set ERR=1
-xcopy "%~dp0\..\git-flow*"           "%GIT_HOME%\bin"                 /Y /R /F || set ERR=1
-xcopy "%~dp0\..\gitflow-*"           "%GIT_HOME%\bin"                 /Y /R /F || set ERR=1
+xcopy "%~dp0\..\git-flow*"           "%GIT_HOME%\usr\bin"                 /Y /R /F || set ERR=1
+xcopy "%~dp0\..\gitflow-*"           "%GIT_HOME%\usr\bin"                 /Y /R /F || set ERR=1
 
 if %ERR%==1 choice /T 30 /C Y /D Y /M "Some unexpected errors happened. Sorry, you'll have to fix them by yourself."
 

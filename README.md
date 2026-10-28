@@ -120,6 +120,42 @@ The ``-d`` flag will accept all defaults.
 
 ![Screencast git flow init](http://i.imgur.com/lFQbY5V.gif)
 
+### Worktree mode
+
+git-flow can optionally manage every branch through [`git worktree`](https://git-scm.com/docs/git-worktree)
+instead of checking branches in and out of a single working directory. Enable
+it when initializing a repository:
+
+    git flow init -d --worktree
+
+This restructures the repository into a shared `.bare` directory with sibling
+worktree directories, mirroring your configured branch-type prefixes:
+
+```
+<repo>/
+├── .bare/            (the shared git directory; do not work inside it)
+├── master/           (permanent worktree)
+├── develop/           (permanent worktree)
+├── feature/
+│   └── <name>/        (worktree, created by start/track, removed by finish/delete)
+├── bugfix/
+├── hotfix/
+├── release/
+└── support/
+```
+
+Once enabled, `start`/`track` create a new worktree for the branch, `finish`/
+`delete` remove it (after merging/validating, and before deleting the branch
+itself), and `rebase`/`pull` operate on the branch's own worktree no matter
+where you invoke the command from. `checkout`/`co` can no longer switch your
+shell's current directory (a command cannot do that for the shell that
+invoked it); it prints the worktree's path instead, so you can `cd` into it
+yourself.
+
+Worktree mode is off by default and fully opt-in. Once a repository has it
+enabled, the setting is sticky: a plain `git flow init` leaves it alone, and
+changing it again requires `git flow init -f`.
+
 ### Creating feature/release/hotfix/support branches
 
 * To list/start/finish/delete feature branches, use:
@@ -230,6 +266,11 @@ For a wide variety of commands hooks or filters can be called before and after
 the command.  
 The files should be placed in .git/hooks  
 In the directory hooks you can find examples of all the hooks available.
+
+The `start`, `track`, `finish`, and `delete` hooks receive one additional
+trailing argument: the branch's worktree path when [worktree mode](#worktree-mode)
+is enabled, or an empty string otherwise. Existing hook scripts that only read
+their original arguments are unaffected.
 
 ## Showing your appreciation
 

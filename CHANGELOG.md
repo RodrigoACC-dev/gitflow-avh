@@ -42,6 +42,7 @@
 
 #### 1.12.4-dev0
 * Preparation for next release
+* Enhancement: Add opt-in worktree mode (`git flow init --worktree`). When enabled, `start`/`track`/`finish`/`delete`/`rebase`/`pull`/`publish`/`checkout`/`rename` manage branches through `git worktree` instead of checking them in and out of a single working tree. Off by default; existing repositories and workflows are unaffected. The `start`/`track`/`finish`/`delete` hooks gain a new trailing argument with the branch's worktree path (empty string when worktree mode is off).
 
 #### 1.12.3
 * Explicitly get the default values from the system and global config.

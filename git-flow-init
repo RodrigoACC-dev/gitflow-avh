@@ -449,6 +449,55 @@ file=    use given config file
 	# TODO: what to do with origin?
 }
 
+# gitflow_init_preserved_reason <hub-dir> <name>
+#
+# Prints the reason (and returns 0) when a top-level entry must stay in
+# the repository hub instead of being migrated into a worktree:
+# untracked directories excluded by .gitignore, and directories holding
+# their own Git repository (moving those would break their relative
+# gitdir links). Returns 1 for everything else.
+#
+gitflow_init_preserved_reason() {
+	local hub name full_path
+
+	hub=$1
+	name=$2
+	full_path=$hub/$name
+
+	# Only untracked directories: an ignore rule must never claim a
+	# directory that still has versioned content underneath it.
+	if [ -d "$full_path" ] && [ -z "$(git -C "$hub" ls-files -- "$name" | head -n 1)" ]; then
+		if git -C "$hub" check-ignore -q -- "$name/" 2>/dev/null ||
+			git -C "$hub" check-ignore -q -- "$name" 2>/dev/null; then
+			echo "ignored"
+			return 0
+		fi
+	fi
+	if [ -e "$full_path/.git" ] || [ -L "$full_path/.git" ]; then
+		echo "nested Git repository"
+		return 0
+	fi
+	return 1
+}
+
+# gitflow_init_restore_staging <hub-dir> <staging-dir>
+#
+# Moves everything still in the staging directory back to the hub root
+# and removes it. Returns non-zero if any move failed.
+#
+gitflow_init_restore_staging() {
+	local entry restore_failed
+
+	restore_failed=0
+	for entry in "$2"/* "$2"/.[!.]* "$2"/..?*; do
+		[ -e "$entry" ] || [ -L "$entry" ] || continue
+		mv "$entry" "$1/" || restore_failed=1
+	done
+	[ "$restore_failed" -eq 0 ] || return 1
+	rmdir "$2" 2>/dev/null
+	return 0
+}
+
 # gitflow_init_setup_worktrees()
 #
 # One-time migration into the opt-in worktree layout: the repository's
@@ -461,11 +510,16 @@ file=    use given config file
 # ".bare" already exists, but still (re-)creates any missing prefix
 # container directories.
 #
+# Top-level directories excluded by .gitignore, and top-level
+# directories holding their own Git repository, are never moved: they
+# stay in the hub root and are reported at the end of the migration.
+#
 # $1 Master branch name
 # $2 Develop branch name
 #
 gitflow_init_setup_worktrees() {
 	local master_branch develop_branch repo_root bare_dir cur_branch entry prefix prefix_dir staging
+	local name reason preserved
 
 	master_branch=$1
 	develop_branch=$2
@@ -477,6 +531,7 @@ gitflow_init_setup_worktrees() {
 	# (parent of ".bare").
 	repo_root="$(gitflow_worktree_hub_dir)"
 	bare_dir="$repo_root/.bare"
+	preserved=
 
 	if [ -d "$bare_dir" ]; then
 		warn "Worktree layout already set up ('.bare' exists); skipping migration."
@@ -486,20 +541,44 @@ gitflow_init_setup_worktrees() {
 			die "Cannot enable worktree mode from a detached HEAD. Check out '$master_branch' or '$develop_branch' first, then run 'git flow init -f --worktree' again."
 		fi
 
+		# Pass 1: decide what stays at the hub without modifying anything
+		# yet, so a collision with a worktree directory aborts cleanly.
+		for entry in "$repo_root"/* "$repo_root"/.[!.]* "$repo_root"/..?*; do
+			[ -e "$entry" ] || [ -L "$entry" ] || continue
+			name=$(basename "$entry")
+			case "$name" in
+			.git | .gitflow-migrate-tmp) continue ;;
+			esac
+			reason=$(gitflow_init_preserved_reason "$repo_root" "$name") || continue
+			if [ "$name" = "$cur_branch" ] || [ "$name" = "$master_branch" ] || [ "$name" = "$develop_branch" ]; then
+				die "Cannot migrate: '$name' must stay at the hub, but it is also the worktree directory for the current, master or develop branch. Rename or move '$name' and re-run 'git flow init -f --worktree'."
+			fi
+			preserved="${preserved}  ${name} (${reason})
+"
+		done
+
 		# "git worktree add" requires its target path to not already
-		# exist, so stage the repo root's current content (tracked and
+		# exist, so stage the rest of the repo root (tracked and
 		# untracked alike) out of the way first, relocate ".git", let
 		# "worktree add" create a fresh empty directory for the branch,
-		# then move the staged files back into it.
+		# then move the staged files back into it. Entries preserved by
+		# pass 1 are never moved.
 		staging="$repo_root/.gitflow-migrate-tmp"
-		mkdir "$staging" || die "Could not create a temporary staging directory for migration."
+		mkdir "$staging" || die "Could not create staging directory '$staging'. If it is left over from an earlier failed migration, inspect it, move its contents back to '$repo_root', remove it, and retry."
 
 		for entry in "$repo_root"/* "$repo_root"/.[!.]* "$repo_root"/..?*; do
 			[ -e "$entry" ] || [ -L "$entry" ] || continue
-			case "$(basename "$entry")" in
+			name=$(basename "$entry")
+			case "$name" in
 			.git | .gitflow-migrate-tmp) continue ;;
 			esac
-			mv "$entry" "$staging/" || die "Could not stage '$entry' for migration."
+			gitflow_init_preserved_reason "$repo_root" "$name" >/dev/null && continue
+			if ! mv "$entry" "$staging/"; then
+				if gitflow_init_restore_staging "$repo_root" "$staging"; then
+					die "Could not move '$name' out of the repository root. Entries already moved were restored, so the checkout is unchanged. If '$name' is a local build, cache or vendor directory, add it to .gitignore (or .git/info/exclude) and re-run 'git flow init -f --worktree'; otherwise check permissions and close programs (editors, watchers, antivirus) using files inside it."
+				fi
+				die "Could not move '$name' out of the repository root, and restoring the previously moved entries also failed. Inspect '$staging' and '$repo_root' manually before retrying."
+			fi
 		done
 
 		mv "$repo_root/.git" "$bare_dir" || die "Could not move '.git' to '.bare'."
@@ -531,7 +610,7 @@ gitflow_init_setup_worktrees() {
 
 		for entry in "$staging"/* "$staging"/.[!.]* "$staging"/..?*; do
 			[ -e "$entry" ] || [ -L "$entry" ] || continue
-			mv "$entry" "$repo_root/$cur_branch/" || die "Could not relocate '$entry' into '$repo_root/$cur_branch'."
+			mv "$entry" "$repo_root/$cur_branch/" || die "Could not move '$entry' into '$repo_root/$cur_branch'. The repository is already in worktree layout; the remaining staged entries are in '$staging' - move them into place manually."
 		done
 		rmdir "$staging" 2>/dev/null
 
@@ -560,6 +639,10 @@ gitflow_init_setup_worktrees() {
 		prefix_dir=${prefix_dir%/}
 		[ -n "$prefix_dir" ] && mkdir -p "$repo_root/$prefix_dir"
 	done
+
+	if [ -n "$preserved" ]; then
+		printf 'Left untouched in the repository hub (not moved into any worktree):\n%s' "$preserved"
+	fi
 }
 
 cmd_help() {

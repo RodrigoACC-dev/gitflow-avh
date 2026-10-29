@@ -198,6 +198,55 @@ test_squash_message_in_base_worktree() {
 	assert_file_exists "$dir/develop/a.txt" "squash merge lands in develop"
 }
 
+assert_status() {
+	_actual=$(git -C "$1" status --porcelain)
+	[ "$_actual" = "$2" ] && ok || bad "$3 (got: $_actual)"
+}
+
+test_preserved_top_level_dirs() {
+	printf 'init: ignored dirs and nested repos stay at the hub\n'
+	dir=$(new_repo "$TMP_ROOT/preserved")
+	printf 'scratch\n' > "$dir/notes.txt"                 # legitimately untracked
+	(
+		cd "$dir" || exit 1
+		printf 'build/\n' > .gitignore
+		git add .gitignore
+		git commit -q -m "ignore build"
+	)
+	mkdir -p "$dir/build"
+	printf 'artifact\n' > "$dir/build/out.bin"
+	mkdir -p "$dir/nested repo"
+	(
+		cd "$dir/nested repo" || exit 1
+		git init -q -b main .
+		printf 'nested\n' > nested.txt
+		git add nested.txt
+		git commit -q -m nested
+		git worktree add -q "$dir/nested-wt" -b wt   # .git as a file
+	) || exit 1
+	out=$(cd "$dir" && "$FLOW" init -d --worktree 2>&1)
+	assert_dir_exists "$dir/.bare" "migration completes with preserved dirs"
+	assert_dir_absent "$dir/.gitflow-migrate-tmp" "no staging directory remains"
+	assert_file_exists "$dir/build/out.bin" "ignored dir stays at the hub"
+	assert_dir_exists "$dir/nested repo" "nested repo stays at the hub"
+	assert_dir_exists "$dir/nested-wt" "nested worktree (.git file) stays at the hub"
+	assert_dir_absent "$dir/master/build" "ignored dir is not moved into the worktree"
+	assert_dir_absent "$dir/master/nested repo" "nested repo is not moved into the worktree"
+	assert_file_exists "$dir/master/notes.txt" "legit untracked file migrates"
+	assert_status "$dir/master" "?? notes.txt" "master worktree clean except the migrated untracked file"
+	assert_status "$dir/develop" "" "develop worktree is clean"
+	assert_contains "$out" "build (ignored)" "init reports the ignored dir left at the hub"
+	assert_contains "$out" "nested repo (nested Git repository)" "init reports the nested repo left at the hub"
+	(
+		cd "$dir/nested repo" || exit 1
+		printf 'more\n' > more.txt
+		git add more.txt
+		git commit -q -m more
+	) || exit 1
+	[ "$(git -C "$dir/nested repo" log -1 --format=%s)" = more ] && ok || bad "nested repo still works after migration"
+	assert_status "$dir/nested-wt" "" "nested worktree still works after migration"
+}
+
 test_classic_mode_unchanged() {
 	printf 'classic: single-tree flow is unaffected\n'
 	dir=$(new_repo "$TMP_ROOT/classic")
@@ -225,6 +274,7 @@ test_conflict_and_resume
 test_finish_requires_base_worktree
 test_forced_removal_failure
 test_squash_message_in_base_worktree
+test_preserved_top_level_dirs
 test_classic_mode_unchanged
 
 printf '\n%d checks, %d failure(s)\n' "$checks" "$failures"

@@ -453,11 +453,13 @@ file=    use given config file
 		gitflow_init_setup_worktrees "$master_branch" "$develop_branch"
 	elif [ "$worktree_explicit" = "false" ]; then
 		if [ -d "$(gitflow_worktree_hub_dir)/.bare" ]; then
-			warn "Worktree mode is being disabled. The existing '.bare' directory and worktrees on disk are left as-is; collapsing them back into a single working tree is a manual step."
+			# Collapse back to a single working tree; this also clears
+			# the gitflow.worktree setting.
+			gitflow_init_collapse_worktrees "$develop_branch"
 		else
 			warn "Worktree mode is being disabled."
+			git_do config $gitflow_config_option --bool gitflow.worktree false
 		fi
-		git_do config $gitflow_config_option --bool gitflow.worktree false
 	elif gitflow_worktree_enabled; then
 		# Flag not mentioned: keep the mode, and finish a migration that a
 		# previous run may not have completed.
@@ -516,6 +518,161 @@ gitflow_init_restore_staging() {
 	return 0
 }
 
+# gitflow_init_collapse_preflight <hub-dir> <develop-branch>
+#
+# Read-only checks for the rollback. Dies with an actionable message when
+# the repository cannot be collapsed safely, so the destructive part of
+# the conversion only runs on a repository that is known to be clean.
+#
+gitflow_init_collapse_preflight() {
+	local hub develop_branch bare paths path gitfile admin status_output old_ifs
+
+	hub=$1
+	develop_branch=$2
+	bare="$hub/.bare"
+
+	[ -d "$bare" ] || die "No worktree layout found at '$hub'."
+	[ -d "$hub/$develop_branch" ] || die "Cannot collapse: the '$develop_branch' worktree is missing at '$hub/$develop_branch'. Restore it with 'git --git-dir=.bare worktree add \"$hub/$develop_branch\" \"$develop_branch\"' and retry."
+	[ -e "$hub/.gitflow-migrate-tmp" ] && die "Cannot collapse: '$hub/.gitflow-migrate-tmp' already exists. Inspect it, move its contents back to '$hub', remove it, and retry."
+
+	paths=$(git --git-dir="$bare" worktree list --porcelain | sed -n 's/^worktree //p')
+	old_ifs=$IFS
+	IFS='
+'
+	for path in $paths; do
+		[ "$path" = "$bare" ] && continue
+
+		gitfile=$(sed -n '1s/^gitdir: //p' "$path/.git" 2>/dev/null)
+		if [ -n "$gitfile" ]; then
+			case "$gitfile" in
+			/*) admin=$gitfile ;;
+			*) admin="$path/$gitfile" ;;
+			esac
+			if [ -f "$admin/locked" ]; then
+				IFS=$old_ifs
+				die "Cannot collapse: worktree '$path' is locked. Unlock it with 'git worktree unlock \"$path\"' and retry."
+			fi
+		fi
+
+		# The develop worktree is the one that survives, so its own
+		# changes are preserved; every other worktree is discarded.
+		if [ "$path" != "$hub/$develop_branch" ]; then
+			status_output=$(git -C "$path" status --porcelain 2>/dev/null)
+			if [ -n "$status_output" ]; then
+				IFS=$old_ifs
+				die "Cannot collapse: worktree '$path' has uncommitted or untracked changes ($(printf '%s' "$status_output" | head -n 1)). Commit, stash or clean them, then retry."
+			fi
+		fi
+	done
+	IFS=$old_ifs
+}
+
+# gitflow_init_collapse_worktrees <develop-branch>
+#
+# Reverse migration: collapses the worktree layout back into Git Flow's
+# default single-working-tree repository. The develop worktree's content
+# survives as the checkout at the hub root; every other worktree is
+# removed (its branch is kept), .bare becomes .git again, and settings
+# rewritten by the forward migration are restored.
+#
+gitflow_init_collapse_worktrees() {
+	local develop_branch hub bare staging paths path entry prefix prefix_dir
+	local removed_report ignored_report ignored_count saved old_ifs
+
+	develop_branch=$1
+	hub=$(gitflow_worktree_hub_dir)
+	bare="$hub/.bare"
+	staging="$hub/.gitflow-migrate-tmp"
+	removed_report=
+	ignored_report=
+
+	gitflow_init_collapse_preflight "$hub" "$develop_branch"
+
+	mkdir "$staging" || die "Could not create staging directory '$staging'."
+
+	# Move the surviving worktree's files aside (its ".git" file stays
+	# behind with the worktree registration and is removed with it).
+	for entry in "$hub/$develop_branch"/* "$hub/$develop_branch"/.[!.]* "$hub/$develop_branch"/..?*; do
+		[ -e "$entry" ] || [ -L "$entry" ] || continue
+		[ "$(basename "$entry")" = ".git" ] && continue
+		if ! mv "$entry" "$staging/"; then
+			if gitflow_init_restore_staging "$hub/$develop_branch" "$staging"; then
+				die "Could not move '$entry' out of '$hub/$develop_branch'. The files already moved were restored, so the working tree is unchanged."
+			fi
+			die "Could not move '$entry' out of '$hub/$develop_branch', and restoring the previously moved entries also failed. Inspect '$staging' and '$hub/$develop_branch' manually before retrying."
+		fi
+	done
+
+	# Remove every linked worktree. --force is safe here: the preflight
+	# verified the discarded ones are clean, and the surviving one was
+	# emptied on purpose above.
+	paths=$(git --git-dir="$bare" worktree list --porcelain | sed -n 's/^worktree //p')
+	old_ifs=$IFS
+	IFS='
+'
+	for path in $paths; do
+		[ "$path" = "$bare" ] && continue
+		if [ "$path" != "$hub/$develop_branch" ]; then
+			ignored_count=$(git -C "$path" status --porcelain --ignored=matching 2>/dev/null | grep -c '^!!')
+			[ "$ignored_count" -gt 0 ] && ignored_report="${ignored_report}  $path ($ignored_count ignored path(s))
+"
+		fi
+		if ! git --git-dir="$bare" worktree remove --force "$path"; then
+			IFS=$old_ifs
+			die "Could not remove worktree '$path'. The staged files are in '$staging'; the repository is still in worktree layout."
+		fi
+		removed_report="${removed_report}  $path
+"
+	done
+	IFS=$old_ifs
+
+	rm -f "$hub/.git" || die "Could not remove the hub '.git' pointer file."
+	mv "$bare" "$hub/.git" || die "Could not move '.bare' to '.git'. The worktrees were removed; re-add them with 'git --git-dir=.bare worktree add <path> <branch>' and retry."
+	git --git-dir="$hub/.git" config core.bare false || die "Could not disable core.bare in '$hub/.git'."
+
+	if [ "$(git --git-dir="$hub/.git" config --get gitflow.path.hooks 2>/dev/null)" = "$bare/hooks" ]; then
+		git --git-dir="$hub/.git" config gitflow.path.hooks "$hub/.git/hooks"
+	fi
+
+	git --git-dir="$hub/.git" symbolic-ref HEAD "refs/heads/$develop_branch" || die "Could not point HEAD at '$develop_branch'."
+
+	for entry in "$staging"/* "$staging"/.[!.]* "$staging"/..?*; do
+		[ -e "$entry" ] || [ -L "$entry" ] || continue
+		mv "$entry" "$hub/" || die "Could not move '$entry' back to '$hub'. The repository is already a single working tree; the remaining files are in '$staging'."
+	done
+	rmdir "$staging" 2>/dev/null
+
+	(cd "$hub" && git reset -q) || die "Could not resync the index at '$hub'."
+
+	# Container directories only exist for worktree mode; drop the ones
+	# the collapse left empty.
+	for prefix in feature bugfix release hotfix support; do
+		prefix_dir=$(git --git-dir="$hub/.git" config --get "gitflow.prefix.$prefix")
+		prefix_dir=${prefix_dir%/}
+		[ -n "$prefix_dir" ] && rmdir "$hub/$prefix_dir" 2>/dev/null
+	done
+
+	saved=$(git --git-dir="$hub/.git" config --get gitflow.worktree.savedfetch 2>/dev/null)
+	if [ -n "$saved" ]; then
+		git --git-dir="$hub/.git" config remote.origin.fetch "$saved"
+		git --git-dir="$hub/.git" config --unset gitflow.worktree.savedfetch
+	fi
+	git --git-dir="$hub/.git" config --unset gitflow.worktree 2>/dev/null
+
+	echo
+	echo "Summary of actions:"
+	echo "- Worktree mode is disabled; the repository uses a single working tree again"
+	echo "- '$develop_branch' is checked out at '$hub'"
+	echo "- Removed worktrees:"
+	printf '%s' "$removed_report"
+	echo "- Local branches were kept; check one out with 'git checkout <branch>'"
+	if [ -n "$ignored_report" ]; then
+		echo "- Ignored files were discarded with these worktrees:"
+		printf '%s' "$ignored_report"
+	fi
+	echo
+}
+
 # gitflow_init_setup_worktrees()
 #
 # One-time migration into the opt-in worktree layout: the repository's
@@ -537,7 +694,7 @@ gitflow_init_restore_staging() {
 #
 gitflow_init_setup_worktrees() {
 	local master_branch develop_branch repo_root bare_dir cur_branch entry prefix prefix_dir staging
-	local name reason preserved
+	local name reason preserved saved_fetch
 
 	master_branch=$1
 	develop_branch=$2
@@ -621,6 +778,14 @@ gitflow_init_setup_worktrees() {
 		echo "gitdir: ./.bare" > "$repo_root/.git" || die "Could not create the hub '.git' pointer file."
 
 		if git_do --git-dir="$bare_dir" config --get remote.origin.url >/dev/null 2>&1; then
+			# Remember the pre-migration refspec so the rollback can
+			# restore it exactly. Never overwrite an earlier snapshot:
+			# after the first migration the live value is already the
+			# rewritten one.
+			if ! git --git-dir="$bare_dir" config --get gitflow.worktree.savedfetch >/dev/null 2>&1; then
+				saved_fetch=$(git --git-dir="$bare_dir" config --get remote.origin.fetch 2>/dev/null)
+				[ -n "$saved_fetch" ] && git_do --git-dir="$bare_dir" config gitflow.worktree.savedfetch "$saved_fetch"
+			fi
 			git_do --git-dir="$bare_dir" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
 		fi
 

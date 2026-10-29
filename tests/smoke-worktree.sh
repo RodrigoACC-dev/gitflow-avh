@@ -266,13 +266,89 @@ test_worktree_flag_is_sticky() {
 	assert_dir_exists "$dir/.bare" "plain reinit leaves the layout alone"
 
 	out=$(cd "$dir" && "$FLOW" init -f -d --noworktree 2>&1)
-	assert_contains "$out" "being disabled" "--noworktree disables the mode"
-	[ "$(git -C "$dir" config --bool gitflow.worktree)" = false ] && ok || bad "--noworktree writes false"
-	assert_dir_exists "$dir/.bare" "disabling leaves .bare in place"
+	assert_contains "$out" "Worktree mode is disabled" "--noworktree disables the mode"
+	[ -z "$(git -C "$dir" config --bool gitflow.worktree 2>/dev/null)" ] && ok || bad "--noworktree clears the setting"
+	assert_dir_absent "$dir/.bare" "--noworktree collapses the layout"
 
 	out=$(cd "$dir" && "$FLOW" init -f -d -w 2>&1)
 	[ "$(git -C "$dir" config --bool gitflow.worktree)" = true ] && ok || bad "-w re-enables the mode"
-	assert_contains "$out" "already set up" "-w reuses the existing layout"
+	assert_dir_exists "$dir/.bare" "-w migrates the collapsed repository again"
+}
+
+test_worktree_rollback() {
+	printf 'rollback: --noworktree collapses back to a single working tree\n'
+	dir=$(new_repo "$TMP_ROOT/rollback")
+	git -C "$dir" config remote.origin.url "https://example.invalid/repo.git"
+	git -C "$dir" config remote.origin.fetch "+refs/heads/develop:refs/remotes/origin/develop"
+	(
+		cd "$dir" || exit 1
+		printf '*.log\n' > .gitignore
+		git add .gitignore
+		git commit -q -m "ignore logs"
+	)
+	(cd "$dir" && "$FLOW" init -d -w >/dev/null 2>&1)
+	# A clean feature worktree is discarded; its branch must survive.
+	(cd "$dir/develop" && "$FLOW" feature start feat >/dev/null 2>&1)
+	# Ignored content inside a discarded worktree.
+	printf 'noise\n' > "$dir/master/build.log"
+	# Uncommitted work in develop must survive the collapse.
+	printf 'changed\n' > "$dir/develop/README.md"
+	printf 'scratch\n' > "$dir/develop/notes.txt"
+
+	out=$(cd "$dir" && "$FLOW" init -f -d --noworktree 2>&1)
+	assert_dir_absent "$dir/.bare" ".bare is gone after the collapse"
+	[ -d "$dir/.git" ] && ok || bad ".git is a directory again"
+	assert_dir_absent "$dir/develop" "develop worktree directory was removed"
+	assert_dir_absent "$dir/master" "master worktree directory was removed"
+	assert_dir_absent "$dir/feature" "empty feature container was removed"
+	[ "$(git -C "$dir" rev-parse --abbrev-ref HEAD)" = develop ] && ok || bad "develop is checked out at the root"
+	assert_file_exists "$dir/notes.txt" "untracked develop file survives"
+	[ "$(cat "$dir/README.md")" = changed ] && ok || bad "modified develop file survives"
+	assert_branch_exists "$dir" master "master branch survives"
+	assert_branch_exists "$dir" feature/feat "clean feature branch survives"
+	assert_contains "$out" "Removed worktrees" "summary lists removed worktrees"
+	assert_contains "$out" "Ignored files were discarded" "summary reports discarded ignored files"
+	[ -z "$(git -C "$dir" config --bool gitflow.worktree 2>/dev/null)" ] && ok || bad "worktree setting is cleared"
+	[ "$(git -C "$dir" config --get gitflow.path.hooks)" = "$dir/.git/hooks" ] && ok || bad "hooks path points at .git/hooks"
+	[ "$(git -C "$dir" config --get remote.origin.fetch)" = "+refs/heads/develop:refs/remotes/origin/develop" ] && ok || bad "original fetch refspec restored"
+	[ -z "$(git -C "$dir" config --get gitflow.worktree.savedfetch 2>/dev/null)" ] && ok || bad "saved fetch refspec cleared"
+
+	# init requires a clean working tree, and the collapse preserved the
+	# dirty develop state on purpose; commit it before re-enabling.
+	(
+		cd "$dir" || exit 1
+		git add -A
+		git commit -q -m "keep preserved work"
+	)
+	out=$(cd "$dir" && "$FLOW" init -f -d -w 2>&1)
+	assert_dir_exists "$dir/.bare" "round trip: -w migrates again"
+	[ "$(git -C "$dir" config --bool gitflow.worktree)" = true ] && ok || bad "round trip: setting enabled again"
+}
+
+test_worktree_rollback_safeguards() {
+	printf 'rollback: refuses to discard work in progress\n'
+	dir=$(new_repo "$TMP_ROOT/rollback-guard")
+	(cd "$dir" && "$FLOW" init -d -w >/dev/null 2>&1)
+	printf 'dirty\n' > "$dir/master/dirty.txt"
+	out=$(cd "$dir" && "$FLOW" init -f -d --noworktree 2>&1)
+	assert_contains "$out" "Cannot collapse" "dirty master aborts the rollback"
+	assert_dir_exists "$dir/.bare" "aborted rollback leaves .bare in place"
+	assert_dir_exists "$dir/master" "aborted rollback leaves worktrees in place"
+	assert_file_exists "$dir/master/dirty.txt" "aborted rollback leaves the dirty file in place"
+	[ "$(git -C "$dir" config --bool gitflow.worktree)" = true ] && ok || bad "aborted rollback keeps the setting"
+
+	rm -f "$dir/master/dirty.txt"
+	git -C "$dir" worktree lock master --reason "smoke test" >/dev/null 2>&1
+	out=$(cd "$dir" && "$FLOW" init -f -d --noworktree 2>&1)
+	assert_contains "$out" "is locked" "locked worktree aborts the rollback"
+	assert_dir_exists "$dir/.bare" "locked abort leaves .bare in place"
+	git -C "$dir" worktree unlock master >/dev/null 2>&1
+
+	dir2=$(new_repo "$TMP_ROOT/rollback-classic")
+	(cd "$dir2" && "$FLOW" init -d >/dev/null 2>&1)
+	(cd "$dir2" && "$FLOW" init -f -d --noworktree >/dev/null 2>&1)
+	[ "$(git -C "$dir2" config --bool gitflow.worktree)" = false ] && ok || bad "classic repo: only the setting is cleared"
+	assert_dir_absent "$dir2/.bare" "classic repo: no layout change"
 }
 
 test_classic_mode_unchanged() {
@@ -304,6 +380,8 @@ test_forced_removal_failure
 test_squash_message_in_base_worktree
 test_preserved_top_level_dirs
 test_worktree_flag_is_sticky
+test_worktree_rollback
+test_worktree_rollback_safeguards
 test_classic_mode_unchanged
 
 printf '\n%d checks, %d failure(s)\n' "$checks" "$failures"

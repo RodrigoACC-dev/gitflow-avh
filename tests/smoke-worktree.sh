@@ -34,6 +34,7 @@ assert_file_absent()  { [ ! -f "$1" ] && ok || bad "$2 (unexpected file: $1)"; }
 assert_branch_exists()  { git -C "$1" show-ref --verify --quiet "refs/heads/$2" && ok || bad "$3 (missing branch: $2)"; }
 assert_branch_absent()  { git -C "$1" show-ref --verify --quiet "refs/heads/$2" && bad "$3 (branch still exists: $2)" || ok; }
 assert_contains()       { case "$1" in *"$2"*) ok ;; *) bad "$3 (output does not contain: $2)" ;; esac; }
+assert_not_contains()   { case "$1" in *"$2"*) bad "$3 (output contains: $2)" ;; *) ok ;; esac; }
 
 cleanup() {
 	if [ "${KEEP:-0}" = "1" ]; then
@@ -247,6 +248,33 @@ test_preserved_top_level_dirs() {
 	assert_status "$dir/nested-wt" "" "nested worktree still works after migration"
 }
 
+test_worktree_flag_is_sticky() {
+	printf 'init: -w enables, --noworktree disables, plain reinit preserves\n'
+	dir=$(new_repo "$TMP_ROOT/sticky-flag")
+	(cd "$dir" && "$FLOW" init -d >/dev/null 2>&1)
+	# State left by a migration that failed after the setting was written.
+	git -C "$dir" config --bool gitflow.worktree true
+
+	out=$(cd "$dir" && "$FLOW" init -f -d -w 2>&1)
+	assert_dir_exists "$dir/.bare" "-w completes a pending migration"
+	assert_not_contains "$out" "being disabled" "-w does not disable an already-enabled repo"
+	[ "$(git -C "$dir" config --bool gitflow.worktree)" = true ] && ok || bad "-w leaves the setting enabled"
+
+	out=$(cd "$dir" && "$FLOW" init -f -d 2>&1)
+	assert_not_contains "$out" "being disabled" "plain reinit keeps the mode"
+	[ "$(git -C "$dir" config --bool gitflow.worktree)" = true ] && ok || bad "plain reinit leaves the setting enabled"
+	assert_dir_exists "$dir/.bare" "plain reinit leaves the layout alone"
+
+	out=$(cd "$dir" && "$FLOW" init -f -d --noworktree 2>&1)
+	assert_contains "$out" "being disabled" "--noworktree disables the mode"
+	[ "$(git -C "$dir" config --bool gitflow.worktree)" = false ] && ok || bad "--noworktree writes false"
+	assert_dir_exists "$dir/.bare" "disabling leaves .bare in place"
+
+	out=$(cd "$dir" && "$FLOW" init -f -d -w 2>&1)
+	[ "$(git -C "$dir" config --bool gitflow.worktree)" = true ] && ok || bad "-w re-enables the mode"
+	assert_contains "$out" "already set up" "-w reuses the existing layout"
+}
+
 test_classic_mode_unchanged() {
 	printf 'classic: single-tree flow is unaffected\n'
 	dir=$(new_repo "$TMP_ROOT/classic")
@@ -275,6 +303,7 @@ test_finish_requires_base_worktree
 test_forced_removal_failure
 test_squash_message_in_base_worktree
 test_preserved_top_level_dirs
+test_worktree_flag_is_sticky
 test_classic_mode_unchanged
 
 printf '\n%d checks, %d failure(s)\n' "$checks" "$failures"

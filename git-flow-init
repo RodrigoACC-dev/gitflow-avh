@@ -83,17 +83,16 @@ file=    use given config file
 "
 	local gitflow_config_option should_check_existence branchcount guess
 	local master_branch develop_branch default_suggestion answer prefix
+	local worktree_explicit _arg
 
 	# Define flags
 	DEFINE_boolean 'force' false 'force setting of gitflow branches, even if already configured' f
 	DEFINE_boolean 'defaults' false 'use default branch naming conventions' d
-	# Default to whatever is already configured, so a plain `-f` reinit
-	# that doesn't mention --worktree/--no-worktree leaves it untouched.
-	if gitflow_worktree_enabled; then
-		DEFINE_boolean 'worktree' true 'use git worktree for branch lifecycle management' w
-	else
-		DEFINE_boolean 'worktree' false 'use git worktree for branch lifecycle management' w
-	fi
+	# Fixed default: shFlags' short boolean form toggles the default, so a
+	# dynamic default would make `-w` disable the mode when it was already
+	# on. Stickiness is handled below by tracking whether the user
+	# mentioned the flag at all.
+	DEFINE_boolean 'worktree' false 'use git worktree for branch lifecycle management' w
 	DEFINE_boolean 'local' false 'use repository config file'
 	DEFINE_boolean 'global' false 'use global config file'
 	DEFINE_boolean 'system' false 'use system config file'
@@ -107,6 +106,17 @@ file=    use given config file
 
 	# Override defaults with values from config
 	gitflow_override_flag_boolean   "init.defaults"   "defaults"
+
+	# shFlags cannot tell whether a boolean flag was passed explicitly, and
+	# its short form toggles the default. Track it ourselves so `-w` always
+	# means "enable" and re-running init without the flag keeps the mode.
+	worktree_explicit=
+	for _arg in "$@"; do
+		case "$_arg" in
+		-w | --worktree) worktree_explicit=true ;;
+		--noworktree) worktree_explicit=false ;;
+		esac
+	done
 
 	# Parse arguments
 	parse_args "$@"
@@ -433,17 +443,25 @@ file=    use given config file
 
 	# Worktree mode
 	# -------------
-	# Opt-in and sticky: write the setting first (while ".git" still
+	# Opt-in and sticky. `-w`/`--worktree` enables, `--noworktree` disables,
+	# and a reinit that does not mention the flag keeps whatever is already
+	# configured (changing it otherwise requires `git flow init -f`). When
+	# the mode ends up enabled, write the setting first (while ".git" still
 	# exists at its normal location), then migrate the on-disk layout.
-	# Changing it later requires `git flow init -f`.
-	if flag worktree; then
+	if [ "$worktree_explicit" = "true" ]; then
 		git_do config $gitflow_config_option --bool gitflow.worktree true
 		gitflow_init_setup_worktrees "$master_branch" "$develop_branch"
-	else
-		if gitflow_worktree_enabled; then
+	elif [ "$worktree_explicit" = "false" ]; then
+		if [ -d "$(gitflow_worktree_hub_dir)/.bare" ]; then
 			warn "Worktree mode is being disabled. The existing '.bare' directory and worktrees on disk are left as-is; collapsing them back into a single working tree is a manual step."
+		else
+			warn "Worktree mode is being disabled."
 		fi
 		git_do config $gitflow_config_option --bool gitflow.worktree false
+	elif gitflow_worktree_enabled; then
+		# Flag not mentioned: keep the mode, and finish a migration that a
+		# previous run may not have completed.
+		gitflow_init_setup_worktrees "$master_branch" "$develop_branch"
 	fi
 
 	# TODO: what to do with origin?

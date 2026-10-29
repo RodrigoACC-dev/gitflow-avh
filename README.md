@@ -164,6 +164,19 @@ Worktree mode is off by default and fully opt-in. Once a repository has it
 enabled, the setting is sticky: a plain `git flow init` leaves it alone, and
 changing it again requires `git flow init -f`.
 
+To go back to the default single-working-tree flow, run:
+
+    git flow init -f --noworktree
+
+That collapses the layout: `.bare` becomes `.git` again, the `develop` branch
+is checked out at the repository root with its uncommitted and untracked files
+preserved, and the other worktrees are removed while their branches are kept
+(check one out with `git checkout <branch>`). Only clean worktrees are
+discarded — if `master` or any feature/bugfix/hotfix/release/support worktree
+has changes, the rollback aborts before touching anything. Files excluded by
+`.gitignore` inside the discarded worktrees are deleted, and the summary says
+so.
+
 ### Creating feature/release/hotfix/support branches
 
 * To list/start/finish/delete feature branches, use:

@@ -147,6 +147,11 @@ worktree directories, mirroring your configured branch-type prefixes:
 └── support/
 ```
 
+Top-level directories excluded by `.gitignore`, and top-level directories that
+are themselves Git repositories, are left untouched in the hub root during the
+migration (git-flow prints the list at the end); move them into the worktree
+you are working in if you need them there.
+
 Once enabled, `start`/`track` create a new worktree for the branch, `finish`/
 `delete` remove it (after merging/validating, and before deleting the branch
 itself), and `rebase`/`pull` operate on the branch's own worktree no matter

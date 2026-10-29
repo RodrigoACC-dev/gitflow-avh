@@ -29,7 +29,7 @@ Once a repository has been initialized, Git Flow SHALL NOT change the `gitflow.w
 - **THEN** `gitflow.worktree` may be changed, triggering the corresponding layout migration or rollback
 
 ### Requirement: Enabling worktree mode restructures the repository into a shared bare directory with sibling worktrees
-When worktree mode is enabled for the first time, Git Flow SHALL convert the repository so that its Git database lives in a shared common directory (`.bare`), with `master` and `develop` each checked out in their own permanent, sibling worktree directories. Any content already checked out at the repository root SHALL be preserved by moving it into the worktree directory for the branch that was checked out there. The remote fetch configuration SHALL be adjusted so that remote-tracking refs populate correctly for all worktrees.
+When worktree mode is enabled for the first time, Git Flow SHALL convert the repository so that its Git database lives in a shared common directory (`.bare`), with `master` and `develop` each checked out in their own permanent, sibling worktree directories. Any content already checked out at the repository root SHALL be preserved by moving it into the worktree directory for the branch that was checked out there, except for top-level directories that are excluded by `.gitignore` and top-level directories that are themselves Git repositories, which SHALL be left untouched in the hub root. Those preserved paths SHALL be reported to the user at the end of the migration. The remote fetch configuration SHALL be adjusted so that remote-tracking refs populate correctly for all worktrees.
 
 #### Scenario: Enabling worktree mode on a repository with develop checked out at the root
 - **WHEN** worktree mode is enabled on a repository whose root directory currently holds the checked-out `develop` branch
@@ -38,6 +38,10 @@ When worktree mode is enabled for the first time, Git Flow SHALL convert the rep
 #### Scenario: Master has no prior working copy
 - **WHEN** worktree mode is enabled and `master` was only a local branch reference with no prior checkout
 - **THEN** a new worktree directory for `master` is created from that branch
+
+#### Scenario: Ignored directories and nested repositories stay at the hub
+- **WHEN** worktree mode is enabled on a repository whose root contains a top-level directory excluded by `.gitignore` and a top-level directory holding its own Git repository
+- **THEN** neither directory is moved into a worktree, both remain in the hub root untouched, and the migration completes and reports them to the user
 
 ### Requirement: Branch-type prefixes get persistent container directories
 When worktree mode is enabled, Git Flow SHALL create one top-level directory per configured branch-type prefix (feature, bugfix, hotfix, release, support). These directories SHALL persist independently of any individual branch's lifecycle and SHALL NOT be removed when the last branch worktree inside them is removed.

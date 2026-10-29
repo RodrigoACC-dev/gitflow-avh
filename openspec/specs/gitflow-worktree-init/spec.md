@@ -28,6 +28,18 @@ Once a repository has been initialized, Git Flow SHALL NOT change the `gitflow.w
 - **WHEN** `git flow init -f` is run on an already-initialized repository
 - **THEN** `gitflow.worktree` may be changed, triggering the corresponding layout migration or rollback
 
+#### Scenario: Explicitly enabling an already-enabled repository
+- **WHEN** `git flow init -f -w` (or `--worktree`) is run on a repository where worktree mode is already enabled
+- **THEN** the mode stays enabled (it is never flipped off by the flag), and a pending migration is completed if the layout was not in place yet
+
+#### Scenario: Reinit that does not mention worktree mode
+- **WHEN** `git flow init -f` is run without `-w`, `--worktree` or `--noworktree`
+- **THEN** the configured `gitflow.worktree` value is preserved, and the layout is completed if the mode is enabled but the migration had not finished
+
+#### Scenario: Disabling an enabled repository
+- **WHEN** `git flow init -f --noworktree` is run on a repository where worktree mode is enabled
+- **THEN** `gitflow.worktree` is set to false, the user is warned, and any existing `.bare` directory and worktrees are left on disk
+
 ### Requirement: Enabling worktree mode restructures the repository into a shared bare directory with sibling worktrees
 When worktree mode is enabled for the first time, Git Flow SHALL convert the repository so that its Git database lives in a shared common directory (`.bare`), with `master` and `develop` each checked out in their own permanent, sibling worktree directories. Any content already checked out at the repository root SHALL be preserved by moving it into the worktree directory for the branch that was checked out there, except for top-level directories that are excluded by `.gitignore` and top-level directories that are themselves Git repositories, which SHALL be left untouched in the hub root. Those preserved paths SHALL be reported to the user at the end of the migration. The remote fetch configuration SHALL be adjusted so that remote-tracking refs populate correctly for all worktrees.
 
